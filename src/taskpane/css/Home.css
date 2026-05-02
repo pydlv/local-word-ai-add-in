@@ -1,0 +1,172 @@
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+}
+
+html,
+body,
+.container {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    color: #202124;
+    font-family: "Segoe UI", Arial, sans-serif;
+    background: #f7f7f5;
+}
+
+button,
+input,
+select,
+textarea {
+    font: inherit;
+}
+
+.offlinePane {
+    min-height: 100%;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.paneHeader {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.paneHeader h1 {
+    margin: 0;
+    color: #1f3f3a;
+    font-size: 20px;
+    font-weight: 650;
+}
+
+label {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    color: #4b4f4c;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+input,
+select,
+textarea {
+    width: 100%;
+    min-height: 36px;
+    padding: 8px 10px;
+    color: #202124;
+    border: 1px solid #b9c1bd;
+    border-radius: 6px;
+    background: #ffffff;
+    outline: none;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+    border-color: #27685f;
+    box-shadow: 0 0 0 2px rgba(39, 104, 95, 0.16);
+}
+
+textarea {
+    min-height: 168px;
+    resize: vertical;
+    line-height: 1.45;
+}
+
+button {
+    min-height: 36px;
+    padding: 8px 12px;
+    border: 1px solid #9ba6a0;
+    border-radius: 6px;
+    color: #1f3f3a;
+    background: #ffffff;
+    cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+    border-color: #27685f;
+    background: #eef5f2;
+}
+
+button:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+.settingsGrid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 10px;
+}
+
+.modeGroup {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+    border: 1px solid #9ba6a0;
+    border-radius: 6px;
+    overflow: hidden;
+    background: #ffffff;
+}
+
+.modeButton {
+    width: 100%;
+    border: 0;
+    border-radius: 0;
+    color: #4b4f4c;
+    background: #ffffff;
+    font-weight: 650;
+}
+
+.modeButton + .modeButton {
+    border-left: 1px solid #9ba6a0;
+}
+
+.modeButton.active {
+    color: #ffffff;
+    background: #27685f;
+}
+
+.modeButton:hover:not(:disabled) {
+    color: #1f3f3a;
+    background: #eef5f2;
+}
+
+.modeButton.active:hover:not(:disabled) {
+    color: #ffffff;
+    background: #1f5b52;
+}
+
+.promptBox {
+    flex: 1;
+}
+
+.primaryAction {
+    width: 100%;
+    color: #ffffff;
+    border-color: #27685f;
+    background: #27685f;
+    font-weight: 650;
+}
+
+.primaryAction:hover:not(:disabled) {
+    color: #ffffff;
+    background: #1f5b52;
+}
+
+.status {
+    min-height: 20px;
+    color: #59615d;
+    font-size: 12px;
+    line-height: 1.35;
+}
