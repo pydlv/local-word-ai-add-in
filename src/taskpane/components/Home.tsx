@@ -1,8 +1,9 @@
 import React from "react";
 
 const SETTINGS_KEY = "offline-writer-settings";
-const LAST_ACTION_TAG = "local-writer-last-action";
-const ACTIVE_SELECTION_TAG = "local-writer-active-selection";
+const LAST_ACTION_BOOKMARK = "_LocalWriterLastAction";
+const ACTIVE_SELECTION_BOOKMARK = "_LocalWriterSelection";
+const LEGACY_CONTENT_CONTROL_TAGS = ["local-writer-last-action", "local-writer-active-selection"];
 
 interface LocalModel {
     id: string;
@@ -83,6 +84,7 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
 
     componentDidMount() {
         this.refreshModels();
+        this.cleanupLegacyContentControls();
     }
 
     loadSettings(): Settings {
@@ -192,7 +194,7 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
 
     async getContextAroundSelection(): Promise<ContextResult> {
         return Word.run(async (ctx) => {
-            await this.clearTaggedControls(ctx, ACTIVE_SELECTION_TAG, true);
+            ctx.document.deleteBookmark(ACTIVE_SELECTION_BOOKMARK);
 
             const selection = ctx.document.getSelection();
             const bodyRange = selection.parentBody.getRange(Word.RangeLocation.content);
@@ -213,11 +215,8 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
             const before = bodyText.slice(0, selectionStart).replace(/\s+$/g, "");
             const after = bodyText.slice(selectionEnd).replace(/^\s+/g, "");
             const window = this.createRollingWindow(before, after);
-            const marker = selection.insertContentControl("RichText");
 
-            marker.tag = ACTIVE_SELECTION_TAG;
-            marker.title = "Local Writer active selection";
-            marker.appearance = "Hidden";
+            selection.insertBookmark(ACTIVE_SELECTION_BOOKMARK);
             await ctx.sync();
 
             return {
@@ -396,32 +395,30 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
         return text;
     }
 
-    markGeneratedRange(range: Word.Range) {
-        const control = range.insertContentControl("RichText");
+    async cleanupLegacyContentControls() {
+        await Word.run(async (ctx) => {
+            const collections = LEGACY_CONTENT_CONTROL_TAGS.map((tag) => {
+                const collection = ctx.document.contentControls.getByTag(tag);
 
-        control.tag = LAST_ACTION_TAG;
-        control.title = "Local Writer generated text";
-        control.appearance = "Hidden";
-    }
+                collection.load("items");
+                return collection;
+            });
 
-    clearTaggedControls(ctx: Word.RequestContext, tag: string, keepContent: boolean) {
-        const previous = ctx.document.contentControls.getByTag(tag);
-
-        previous.load("items");
-        return ctx.sync().then(() => {
-            previous.items.forEach((control) => control.delete(keepContent));
-        });
+            await ctx.sync();
+            collections.forEach((collection) => collection.items.forEach((control) => control.delete(true)));
+            await ctx.sync();
+        }).catch(() => undefined);
     }
 
     async insertAtCursor(text: string) {
         await Word.run(async (ctx) => {
-            await this.clearTaggedControls(ctx, ACTIVE_SELECTION_TAG, true);
-            await this.clearTaggedControls(ctx, LAST_ACTION_TAG, true);
+            ctx.document.deleteBookmark(ACTIVE_SELECTION_BOOKMARK);
+            ctx.document.deleteBookmark(LAST_ACTION_BOOKMARK);
 
             const selection = ctx.document.getSelection();
             const inserted = selection.insertText(text.trim() + "\n", Word.InsertLocation.replace);
 
-            this.markGeneratedRange(inserted);
+            inserted.insertBookmark(LAST_ACTION_BOOKMARK);
             inserted.select(Word.SelectionMode.end);
             await ctx.sync();
         });
@@ -429,24 +426,21 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
 
     async replaceSelection(text: string) {
         await Word.run(async (ctx) => {
-            await this.clearTaggedControls(ctx, LAST_ACTION_TAG, true);
+            ctx.document.deleteBookmark(LAST_ACTION_BOOKMARK);
 
-            const controls = ctx.document.contentControls.getByTag(ACTIVE_SELECTION_TAG);
-            const control = controls.getFirstOrNullObject();
+            const selectionRange = ctx.document.getBookmarkRangeOrNullObject(ACTIVE_SELECTION_BOOKMARK);
 
-            control.load("isNullObject");
+            selectionRange.load("isNullObject");
             await ctx.sync();
 
-            if (control.isNullObject) {
+            if (selectionRange.isNullObject) {
                 throw new Error("Could not find the selected text to replace.");
             }
 
-            const inserted = control.insertText(text.trim(), Word.InsertLocation.replace);
+            const inserted = selectionRange.insertText(text.trim(), Word.InsertLocation.replace);
 
-            this.markGeneratedRange(inserted);
-            await ctx.sync();
-            control.delete(true);
-            await ctx.sync();
+            ctx.document.deleteBookmark(ACTIVE_SELECTION_BOOKMARK);
+            inserted.insertBookmark(LAST_ACTION_BOOKMARK);
             inserted.select();
             await ctx.sync();
         });
@@ -460,27 +454,26 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
         }
 
         await Word.run(async (ctx) => {
-            const controls = ctx.document.contentControls.getByTag(LAST_ACTION_TAG);
-            const control = controls.getFirstOrNullObject();
+            const actionRange = ctx.document.getBookmarkRangeOrNullObject(LAST_ACTION_BOOKMARK);
 
-            control.load("isNullObject");
+            actionRange.load("isNullObject");
             await ctx.sync();
 
-            if (control.isNullObject) {
+            if (actionRange.isNullObject) {
                 throw new Error("Could not find the previous generated text.");
             }
 
             if (lastAction.mode === "replace") {
-                const restored = control.insertText(lastAction.originalText, Word.InsertLocation.replace);
+                const restored = actionRange.insertText(lastAction.originalText, Word.InsertLocation.replace);
 
+                ctx.document.deleteBookmark(LAST_ACTION_BOOKMARK);
                 restored.select();
-                await ctx.sync();
-                control.delete(true);
             } else {
-                control.delete(false);
+                actionRange.delete();
+                ctx.document.deleteBookmark(LAST_ACTION_BOOKMARK);
             }
 
-            await this.clearTaggedControls(ctx, ACTIVE_SELECTION_TAG, true);
+            ctx.document.deleteBookmark(ACTIVE_SELECTION_BOOKMARK);
             await ctx.sync();
         });
     }
@@ -516,7 +509,7 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
             }
         } catch (error) {
             await Word.run(async (ctx) => {
-                await this.clearTaggedControls(ctx, ACTIVE_SELECTION_TAG, true);
+                ctx.document.deleteBookmark(ACTIVE_SELECTION_BOOKMARK);
                 await ctx.sync();
             }).catch(() => undefined);
             this.setState({ status: this.formatError(error) });
@@ -560,7 +553,7 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
             }
         } catch (error) {
             await Word.run(async (ctx) => {
-                await this.clearTaggedControls(ctx, ACTIVE_SELECTION_TAG, true);
+                ctx.document.deleteBookmark(ACTIVE_SELECTION_BOOKMARK);
                 await ctx.sync();
             }).catch(() => undefined);
             this.setState({ status: this.formatError(error) });
