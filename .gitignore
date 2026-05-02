@@ -15,4 +15,3 @@ npm-debug.log*
 *.njsproj
 *.sln
 *.sw*
-package-lock.json
