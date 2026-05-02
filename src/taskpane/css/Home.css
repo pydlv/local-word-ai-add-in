@@ -164,6 +164,19 @@ button:disabled {
     background: #1f5b52;
 }
 
+.secondaryAction {
+    width: 100%;
+    color: #5d302c;
+    border-color: #c6aaa5;
+    background: #ffffff;
+    font-weight: 650;
+}
+
+.secondaryAction:hover:not(:disabled) {
+    border-color: #9d4b43;
+    background: #f8efed;
+}
+
 .status {
     min-height: 20px;
     color: #59615d;

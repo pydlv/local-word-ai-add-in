@@ -1,6 +1,8 @@
 import React from "react";
 
 const SETTINGS_KEY = "offline-writer-settings";
+const LAST_ACTION_TAG = "local-writer-last-action";
+const ACTIVE_SELECTION_TAG = "local-writer-active-selection";
 
 interface LocalModel {
     id: string;
@@ -21,6 +23,17 @@ interface HomeState extends Settings {
     models: LocalModel[];
     isLoading: boolean;
     status: string;
+    lastAction: LastAction | null;
+}
+
+interface ContextResult {
+    context: string;
+    selectedText?: string;
+}
+
+interface LastAction {
+    mode: WriterMode;
+    originalText: string;
 }
 
 export enum Page {
@@ -41,7 +54,13 @@ const systemPrompts: Record<WriterMode, string> = {
     insert:
         "You are an offline writing assistant inside Microsoft Word. Use the document context and the cursor marker to write one polished paragraph for the cursor location. Return only the paragraph text.",
     replace:
-        "You are an offline writing assistant inside Microsoft Word. Rewrite only the selected text according to the user's prompt while preserving the surrounding document context. Return only the replacement text.",
+        [
+            "You are an offline span editor inside Microsoft Word.",
+            "Rewrite only the selected text according to the user's prompt.",
+            "The text before and after the selection is already in the document and must not be repeated.",
+            "Return only the replacement span that can be pasted exactly between BEFORE_SELECTION and AFTER_SELECTION.",
+            "If the selection is a sentence fragment, return a sentence fragment. Do not expand it into a full sentence or paragraph.",
+        ].join(" "),
 };
 
 function isLocalAddInHost() {
@@ -59,6 +78,7 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
         models: [],
         isLoading: false,
         status: "",
+        lastAction: null,
     };
 
     componentDidMount() {
@@ -150,7 +170,7 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
             .filter((model): model is LocalModel => model !== null);
     }
 
-    async getContextAroundCursor(): Promise<string> {
+    async getContextAroundCursor(): Promise<ContextResult> {
         return Word.run(async (ctx) => {
             const selection = ctx.document.getSelection();
             const cursor = selection.getRange(Word.RangeLocation.start);
@@ -166,12 +186,14 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
             const after = bodyText.slice(cursorIndex).replace(/^\s+/g, "");
             const window = this.createRollingWindow(before, after);
 
-            return [window.before, "[[CURSOR]]", window.after].filter(Boolean).join("\n");
+            return { context: [window.before, "[[CURSOR]]", window.after].filter(Boolean).join("\n") };
         });
     }
 
-    async getContextAroundSelection(): Promise<string> {
+    async getContextAroundSelection(): Promise<ContextResult> {
         return Word.run(async (ctx) => {
+            await this.clearTaggedControls(ctx, ACTIVE_SELECTION_TAG, true);
+
             const selection = ctx.document.getSelection();
             const bodyRange = selection.parentBody.getRange(Word.RangeLocation.content);
 
@@ -191,8 +213,26 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
             const before = bodyText.slice(0, selectionStart).replace(/\s+$/g, "");
             const after = bodyText.slice(selectionEnd).replace(/^\s+/g, "");
             const window = this.createRollingWindow(before, after);
+            const marker = selection.insertContentControl("RichText");
 
-            return [window.before, "[[SELECTION]]", selectedText, "[[/SELECTION]]", window.after].filter(Boolean).join("\n");
+            marker.tag = ACTIVE_SELECTION_TAG;
+            marker.title = "Local Writer active selection";
+            marker.appearance = "Hidden";
+            await ctx.sync();
+
+            return {
+                context: [
+                    "BEFORE_SELECTION:",
+                    window.before || "(none)",
+                    "",
+                    "SELECTED_TEXT:",
+                    selectedText,
+                    "",
+                    "AFTER_SELECTION:",
+                    window.after || "(none)",
+                ].join("\n"),
+                selectedText,
+            };
         });
     }
 
@@ -225,26 +265,44 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
         };
     }
 
-    buildUserPrompt(context: string) {
-        return [
+    buildUserPrompt(context: string, rejectionFeedback: string = "", mode: WriterMode = this.state.mode) {
+        const parts = [
             "Document context:",
-            context || (this.state.mode === "insert" ? "[[CURSOR]]" : "[[SELECTION]]\n[[/SELECTION]]"),
+            context || (mode === "insert" ? "[[CURSOR]]" : "BEFORE_SELECTION:\n(none)\n\nSELECTED_TEXT:\n\nAFTER_SELECTION:\n(none)"),
             "",
             "User prompt:",
             this.state.prompt.trim(),
-        ].join("\n");
+        ];
+
+        if (mode === "replace") {
+            parts.push(
+                "",
+                "Replacement rules:",
+                "- Return only the new text for SELECTED_TEXT.",
+                "- Do not include BEFORE_SELECTION or AFTER_SELECTION.",
+                "- Do not duplicate words that are already adjacent to the selection.",
+                "- Preserve sentence flow at both boundaries."
+            );
+        }
+
+        if (rejectionFeedback.trim()) {
+            parts.push("", "Previous attempt feedback:", rejectionFeedback.trim(), "", "Try again and incorporate that feedback.");
+        }
+
+        return parts.join("\n");
     }
 
-    async generateText(context: string): Promise<string> {
+    async generateText(context: string, rejectionFeedback: string = "", mode: WriterMode = this.state.mode): Promise<string> {
         const endpoint = this.normalizeEndpoint();
         const model = this.state.model.trim();
-        const userPrompt = this.buildUserPrompt(context);
+        const userPrompt = this.buildUserPrompt(context, rejectionFeedback, mode);
 
         if (!model) {
             throw new Error("Select a local model first.");
         }
 
-        const systemPrompt = systemPrompts[this.state.mode];
+        const systemPrompt = systemPrompts[mode];
+        const temperature = mode === "replace" ? 0.2 : 0.7;
 
         try {
             const response = await this.postJson(`${endpoint}/v1/chat/completions`, {
@@ -254,7 +312,7 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
                     { role: "user", content: userPrompt },
                 ],
                 max_tokens: this.state.maxOutputTokens,
-                temperature: 0.7,
+                temperature,
             });
 
             return this.extractChatText(response);
@@ -267,7 +325,7 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
                         { role: "user", content: userPrompt },
                     ],
                     max_output_tokens: this.state.maxOutputTokens,
-                    temperature: 0.7,
+                    temperature,
                 });
 
                 return this.extractResponsesText(response);
@@ -276,7 +334,7 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
                     model,
                     prompt: `${systemPrompt}\n\n${userPrompt}`,
                     max_tokens: this.state.maxOutputTokens,
-                    temperature: 0.7,
+                    temperature,
                 });
 
                 return this.extractCompletionText(response);
@@ -338,11 +396,32 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
         return text;
     }
 
+    markGeneratedRange(range: Word.Range) {
+        const control = range.insertContentControl("RichText");
+
+        control.tag = LAST_ACTION_TAG;
+        control.title = "Local Writer generated text";
+        control.appearance = "Hidden";
+    }
+
+    clearTaggedControls(ctx: Word.RequestContext, tag: string, keepContent: boolean) {
+        const previous = ctx.document.contentControls.getByTag(tag);
+
+        previous.load("items");
+        return ctx.sync().then(() => {
+            previous.items.forEach((control) => control.delete(keepContent));
+        });
+    }
+
     async insertAtCursor(text: string) {
         await Word.run(async (ctx) => {
+            await this.clearTaggedControls(ctx, ACTIVE_SELECTION_TAG, true);
+            await this.clearTaggedControls(ctx, LAST_ACTION_TAG, true);
+
             const selection = ctx.document.getSelection();
             const inserted = selection.insertText(text.trim() + "\n", Word.InsertLocation.replace);
 
+            this.markGeneratedRange(inserted);
             inserted.select(Word.SelectionMode.end);
             await ctx.sync();
         });
@@ -350,10 +429,58 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
 
     async replaceSelection(text: string) {
         await Word.run(async (ctx) => {
-            const selection = ctx.document.getSelection();
-            const inserted = selection.insertText(text.trim(), Word.InsertLocation.replace);
+            await this.clearTaggedControls(ctx, LAST_ACTION_TAG, true);
 
+            const controls = ctx.document.contentControls.getByTag(ACTIVE_SELECTION_TAG);
+            const control = controls.getFirstOrNullObject();
+
+            control.load("isNullObject");
+            await ctx.sync();
+
+            if (control.isNullObject) {
+                throw new Error("Could not find the selected text to replace.");
+            }
+
+            const inserted = control.insertText(text.trim(), Word.InsertLocation.replace);
+
+            this.markGeneratedRange(inserted);
+            await ctx.sync();
+            control.delete(true);
+            await ctx.sync();
             inserted.select();
+            await ctx.sync();
+        });
+    }
+
+    async undoLastAction() {
+        const lastAction = this.state.lastAction;
+
+        if (!lastAction) {
+            throw new Error("No previous generated action to reject.");
+        }
+
+        await Word.run(async (ctx) => {
+            const controls = ctx.document.contentControls.getByTag(LAST_ACTION_TAG);
+            const control = controls.getFirstOrNullObject();
+
+            control.load("isNullObject");
+            await ctx.sync();
+
+            if (control.isNullObject) {
+                throw new Error("Could not find the previous generated text.");
+            }
+
+            if (lastAction.mode === "replace") {
+                const restored = control.insertText(lastAction.originalText, Word.InsertLocation.replace);
+
+                restored.select();
+                await ctx.sync();
+                control.delete(true);
+            } else {
+                control.delete(false);
+            }
+
+            await this.clearTaggedControls(ctx, ACTIVE_SELECTION_TAG, true);
             await ctx.sync();
         });
     }
@@ -371,23 +498,71 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
         this.setState({ isLoading: true, status: "Reading cursor context..." });
 
         try {
-            const context =
+            const contextResult =
                 this.state.mode === "replace" ? await this.getContextAroundSelection() : await this.getContextAroundCursor();
 
             this.setState({ status: "Generating locally..." });
 
-            const text = await this.generateText(context);
+            const text = await this.generateText(contextResult.context);
 
             this.setState({ status: this.state.mode === "replace" ? "Replacing..." : "Inserting..." });
 
             if (this.state.mode === "replace") {
                 await this.replaceSelection(text);
-                this.setState({ prompt: "", status: "Replaced." });
+                this.setState({ lastAction: { mode: "replace", originalText: contextResult.selectedText || "" }, status: "Replaced." });
             } else {
                 await this.insertAtCursor(text);
-                this.setState({ prompt: "", status: "Inserted." });
+                this.setState({ lastAction: { mode: "insert", originalText: "" }, status: "Inserted." });
             }
         } catch (error) {
+            await Word.run(async (ctx) => {
+                await this.clearTaggedControls(ctx, ACTIVE_SELECTION_TAG, true);
+                await ctx.sync();
+            }).catch(() => undefined);
+            this.setState({ status: this.formatError(error) });
+        } finally {
+            this.setState({ isLoading: false });
+        }
+    };
+
+    handleReject = async () => {
+        const feedback = window.prompt("Why are you rejecting the previous result?");
+
+        if (feedback === null) {
+            return;
+        }
+
+        if (!feedback.trim()) {
+            this.setState({ status: "Enter feedback to retry." });
+            return;
+        }
+
+        this.setState({ isLoading: true, status: "Undoing previous action..." });
+
+        try {
+            const mode = this.state.lastAction?.mode || this.state.mode;
+
+            await this.undoLastAction();
+            this.setState({ mode, lastAction: null, status: "Reading cursor context..." });
+
+            const contextResult = mode === "replace" ? await this.getContextAroundSelection() : await this.getContextAroundCursor();
+
+            this.setState({ status: "Trying again..." });
+
+            const text = await this.generateText(contextResult.context, feedback, mode);
+
+            if (mode === "replace") {
+                await this.replaceSelection(text);
+                this.setState({ lastAction: { mode: "replace", originalText: contextResult.selectedText || "" }, status: "Replaced." });
+            } else {
+                await this.insertAtCursor(text);
+                this.setState({ lastAction: { mode: "insert", originalText: "" }, status: "Inserted." });
+            }
+        } catch (error) {
+            await Word.run(async (ctx) => {
+                await this.clearTaggedControls(ctx, ACTIVE_SELECTION_TAG, true);
+                await ctx.sync();
+            }).catch(() => undefined);
             this.setState({ status: this.formatError(error) });
         } finally {
             this.setState({ isLoading: false });
@@ -480,6 +655,15 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
 
                 <button className="primaryAction" type="button" onClick={this.handleSubmit} disabled={this.state.isLoading}>
                     {this.state.isLoading ? "Working..." : this.state.mode === "replace" ? "Replace Selection" : "Insert Paragraph"}
+                </button>
+
+                <button
+                    className="secondaryAction"
+                    type="button"
+                    onClick={this.handleReject}
+                    disabled={this.state.isLoading || this.state.lastAction === null}
+                >
+                    Reject Previous Action
                 </button>
 
                 <div className="status" role="status">
