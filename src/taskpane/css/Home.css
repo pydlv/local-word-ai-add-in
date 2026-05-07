@@ -107,6 +107,10 @@ button:disabled {
     display: grid;
     grid-template-columns: 1fr;
     gap: 10px;
+    padding: 12px;
+    border: 1px solid #d5dcd8;
+    border-radius: 6px;
+    background: #ffffff;
 }
 
 .modeGroup {
@@ -151,6 +155,24 @@ button:disabled {
     flex: 1;
 }
 
+.systemPromptBox textarea {
+    min-height: 116px;
+}
+
+.systemPromptHeader {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.resetPromptButton {
+    min-height: 28px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
 .primaryAction {
     width: 100%;
     color: #ffffff;
@@ -162,19 +184,6 @@ button:disabled {
 .primaryAction:hover:not(:disabled) {
     color: #ffffff;
     background: #1f5b52;
-}
-
-.secondaryAction {
-    width: 100%;
-    color: #5d302c;
-    border-color: #c6aaa5;
-    background: #ffffff;
-    font-weight: 650;
-}
-
-.secondaryAction:hover:not(:disabled) {
-    border-color: #9d4b43;
-    background: #f8efed;
 }
 
 .status {

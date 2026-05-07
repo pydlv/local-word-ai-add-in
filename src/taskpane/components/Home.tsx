@@ -1,7 +1,6 @@
 import React from "react";
 
 const SETTINGS_KEY = "offline-writer-settings";
-const LAST_ACTION_BOOKMARK = "_LocalWriterLastAction";
 const ACTIVE_SELECTION_BOOKMARK = "_LocalWriterSelection";
 const LEGACY_CONTENT_CONTROL_TAGS = ["local-writer-last-action", "local-writer-active-selection"];
 
@@ -17,6 +16,7 @@ interface Settings {
     mode: WriterMode;
     maxContextChars: number;
     maxOutputTokens: number;
+    systemPrompts: Record<WriterMode, string>;
 }
 
 interface HomeState extends Settings {
@@ -24,17 +24,11 @@ interface HomeState extends Settings {
     models: LocalModel[];
     isLoading: boolean;
     status: string;
-    lastAction: LastAction | null;
+    showSettings: boolean;
 }
 
 interface ContextResult {
     context: string;
-    selectedText?: string;
-}
-
-interface LastAction {
-    mode: WriterMode;
-    originalText: string;
 }
 
 export enum Page {
@@ -43,15 +37,7 @@ export enum Page {
     Chat = "Chat",
 }
 
-const defaultSettings: Settings = {
-    endpoint: getDefaultEndpoint(),
-    model: "",
-    mode: "insert",
-    maxContextChars: 4000,
-    maxOutputTokens: 180,
-};
-
-const systemPrompts: Record<WriterMode, string> = {
+const defaultSystemPrompts: Record<WriterMode, string> = {
     insert:
         "You are an offline writing assistant inside Microsoft Word. Use the document context and the cursor marker to write one polished paragraph for the cursor location. Return only the paragraph text.",
     replace:
@@ -62,6 +48,15 @@ const systemPrompts: Record<WriterMode, string> = {
             "Return only the replacement span that can be pasted exactly between BEFORE_SELECTION and AFTER_SELECTION.",
             "If the selection is a sentence fragment, return a sentence fragment. Do not expand it into a full sentence or paragraph.",
         ].join(" "),
+};
+
+const defaultSettings: Settings = {
+    endpoint: getDefaultEndpoint(),
+    model: "",
+    mode: "insert",
+    maxContextChars: 4000,
+    maxOutputTokens: 180,
+    systemPrompts: { ...defaultSystemPrompts },
 };
 
 function isLocalAddInHost() {
@@ -79,7 +74,7 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
         models: [],
         isLoading: false,
         status: "",
-        lastAction: null,
+        showSettings: false,
     };
 
     componentDidMount() {
@@ -90,7 +85,15 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
     loadSettings(): Settings {
         try {
             const saved = window.localStorage.getItem(SETTINGS_KEY);
-            const settings = saved ? { ...defaultSettings, ...JSON.parse(saved) } : defaultSettings;
+            const parsedSettings = saved ? JSON.parse(saved) : {};
+            const settings = {
+                ...defaultSettings,
+                ...parsedSettings,
+                systemPrompts: {
+                    ...defaultSystemPrompts,
+                    ...(parsedSettings.systemPrompts || {}),
+                },
+            };
 
             if (isLocalAddInHost() && (settings.endpoint === "http://127.0.0.1:1234" || settings.endpoint === "http://localhost:1234")) {
                 settings.endpoint = "/local-ai";
@@ -109,13 +112,24 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
             mode: nextState.mode ?? this.state.mode,
             maxContextChars: nextState.maxContextChars ?? this.state.maxContextChars,
             maxOutputTokens: nextState.maxOutputTokens ?? this.state.maxOutputTokens,
+            systemPrompts: nextState.systemPrompts ?? this.state.systemPrompts,
         };
 
         window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
     }
 
-    setSetting(key: keyof Settings, value: string | number) {
+    setSetting<K extends Exclude<keyof Settings, "systemPrompts">>(key: K, value: Settings[K]) {
         this.setState({ [key]: value } as any, () => this.saveSettings({ [key]: value } as Partial<Settings>));
+    }
+
+    setSystemPrompt(mode: WriterMode, value: string) {
+        const systemPrompts = { ...this.state.systemPrompts, [mode]: value };
+
+        this.setState({ systemPrompts }, () => this.saveSettings({ systemPrompts }));
+    }
+
+    resetSystemPrompt(mode: WriterMode) {
+        this.setSystemPrompt(mode, defaultSystemPrompts[mode]);
     }
 
     normalizeEndpoint() {
@@ -230,7 +244,6 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
                     "AFTER_SELECTION:",
                     window.after || "(none)",
                 ].join("\n"),
-                selectedText,
             };
         });
     }
@@ -264,7 +277,7 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
         };
     }
 
-    buildUserPrompt(context: string, rejectionFeedback: string = "", mode: WriterMode = this.state.mode) {
+    buildUserPrompt(context: string, mode: WriterMode = this.state.mode) {
         const parts = [
             "Document context:",
             context || (mode === "insert" ? "[[CURSOR]]" : "BEFORE_SELECTION:\n(none)\n\nSELECTED_TEXT:\n\nAFTER_SELECTION:\n(none)"),
@@ -284,23 +297,19 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
             );
         }
 
-        if (rejectionFeedback.trim()) {
-            parts.push("", "Previous attempt feedback:", rejectionFeedback.trim(), "", "Try again and incorporate that feedback.");
-        }
-
         return parts.join("\n");
     }
 
-    async generateText(context: string, rejectionFeedback: string = "", mode: WriterMode = this.state.mode): Promise<string> {
+    async generateText(context: string, mode: WriterMode = this.state.mode): Promise<string> {
         const endpoint = this.normalizeEndpoint();
         const model = this.state.model.trim();
-        const userPrompt = this.buildUserPrompt(context, rejectionFeedback, mode);
+        const userPrompt = this.buildUserPrompt(context, mode);
 
         if (!model) {
             throw new Error("Select a local model first.");
         }
 
-        const systemPrompt = systemPrompts[mode];
+        const systemPrompt = this.state.systemPrompts[mode].trim() || defaultSystemPrompts[mode];
         const temperature = mode === "replace" ? 0.2 : 0.7;
 
         try {
@@ -413,12 +422,10 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
     async insertAtCursor(text: string) {
         await Word.run(async (ctx) => {
             ctx.document.deleteBookmark(ACTIVE_SELECTION_BOOKMARK);
-            ctx.document.deleteBookmark(LAST_ACTION_BOOKMARK);
 
             const selection = ctx.document.getSelection();
             const inserted = selection.insertText(text.trim() + "\n", Word.InsertLocation.replace);
 
-            inserted.insertBookmark(LAST_ACTION_BOOKMARK);
             inserted.select(Word.SelectionMode.end);
             await ctx.sync();
         });
@@ -426,8 +433,6 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
 
     async replaceSelection(text: string) {
         await Word.run(async (ctx) => {
-            ctx.document.deleteBookmark(LAST_ACTION_BOOKMARK);
-
             const selectionRange = ctx.document.getBookmarkRangeOrNullObject(ACTIVE_SELECTION_BOOKMARK);
 
             selectionRange.load("isNullObject");
@@ -440,40 +445,7 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
             const inserted = selectionRange.insertText(text.trim(), Word.InsertLocation.replace);
 
             ctx.document.deleteBookmark(ACTIVE_SELECTION_BOOKMARK);
-            inserted.insertBookmark(LAST_ACTION_BOOKMARK);
             inserted.select();
-            await ctx.sync();
-        });
-    }
-
-    async undoLastAction() {
-        const lastAction = this.state.lastAction;
-
-        if (!lastAction) {
-            throw new Error("No previous generated action to reject.");
-        }
-
-        await Word.run(async (ctx) => {
-            const actionRange = ctx.document.getBookmarkRangeOrNullObject(LAST_ACTION_BOOKMARK);
-
-            actionRange.load("isNullObject");
-            await ctx.sync();
-
-            if (actionRange.isNullObject) {
-                throw new Error("Could not find the previous generated text.");
-            }
-
-            if (lastAction.mode === "replace") {
-                const restored = actionRange.insertText(lastAction.originalText, Word.InsertLocation.replace);
-
-                ctx.document.deleteBookmark(LAST_ACTION_BOOKMARK);
-                restored.select();
-            } else {
-                actionRange.delete();
-                ctx.document.deleteBookmark(LAST_ACTION_BOOKMARK);
-            }
-
-            ctx.document.deleteBookmark(ACTIVE_SELECTION_BOOKMARK);
             await ctx.sync();
         });
     }
@@ -502,54 +474,10 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
 
             if (this.state.mode === "replace") {
                 await this.replaceSelection(text);
-                this.setState({ lastAction: { mode: "replace", originalText: contextResult.selectedText || "" }, status: "Replaced." });
+                this.setState({ status: "Replaced." });
             } else {
                 await this.insertAtCursor(text);
-                this.setState({ lastAction: { mode: "insert", originalText: "" }, status: "Inserted." });
-            }
-        } catch (error) {
-            await Word.run(async (ctx) => {
-                ctx.document.deleteBookmark(ACTIVE_SELECTION_BOOKMARK);
-                await ctx.sync();
-            }).catch(() => undefined);
-            this.setState({ status: this.formatError(error) });
-        } finally {
-            this.setState({ isLoading: false });
-        }
-    };
-
-    handleReject = async () => {
-        const feedback = window.prompt("Why are you rejecting the previous result?");
-
-        if (feedback === null) {
-            return;
-        }
-
-        if (!feedback.trim()) {
-            this.setState({ status: "Enter feedback to retry." });
-            return;
-        }
-
-        this.setState({ isLoading: true, status: "Undoing previous action..." });
-
-        try {
-            const mode = this.state.lastAction?.mode || this.state.mode;
-
-            await this.undoLastAction();
-            this.setState({ mode, lastAction: null, status: "Reading cursor context..." });
-
-            const contextResult = mode === "replace" ? await this.getContextAroundSelection() : await this.getContextAroundCursor();
-
-            this.setState({ status: "Trying again..." });
-
-            const text = await this.generateText(contextResult.context, feedback, mode);
-
-            if (mode === "replace") {
-                await this.replaceSelection(text);
-                this.setState({ lastAction: { mode: "replace", originalText: contextResult.selectedText || "" }, status: "Replaced." });
-            } else {
-                await this.insertAtCursor(text);
-                this.setState({ lastAction: { mode: "insert", originalText: "" }, status: "Inserted." });
+                this.setState({ status: "Inserted." });
             }
         } catch (error) {
             await Word.run(async (ctx) => {
@@ -563,79 +491,105 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
     };
 
     render() {
+        const currentSystemPrompt = this.state.systemPrompts[this.state.mode] || defaultSystemPrompts[this.state.mode];
+
         return (
             <main className="offlinePane">
                 <header className="paneHeader">
                     <h1>Local Writer</h1>
-                    <button type="button" onClick={() => this.refreshModels()} disabled={this.state.isLoading}>
-                        Models
+                    <button type="button" onClick={() => this.setState({ showSettings: !this.state.showSettings })}>
+                        {this.state.showSettings ? "Hide Settings" : "Settings"}
                     </button>
                 </header>
 
-                <section className="settingsGrid">
-                    <div className="modeGroup" role="group" aria-label="Writing mode">
-                        <button
-                            type="button"
-                            className={this.state.mode === "insert" ? "modeButton active" : "modeButton"}
-                            onClick={() => this.setSetting("mode", "insert")}
-                        >
-                            Insert
+                <div className="modeGroup" role="group" aria-label="Writing mode">
+                    <button
+                        type="button"
+                        className={this.state.mode === "insert" ? "modeButton active" : "modeButton"}
+                        onClick={() => this.setSetting("mode", "insert")}
+                    >
+                        Insert
+                    </button>
+                    <button
+                        type="button"
+                        className={this.state.mode === "replace" ? "modeButton active" : "modeButton"}
+                        onClick={() => this.setSetting("mode", "replace")}
+                    >
+                        Replace
+                    </button>
+                </div>
+
+                {this.state.showSettings && (
+                    <section className="settingsGrid">
+                        <label>
+                            Endpoint
+                            <input
+                                value={this.state.endpoint}
+                                onChange={(event) => this.setSetting("endpoint", event.target.value)}
+                                onBlur={() => this.refreshModels()}
+                            />
+                        </label>
+
+                        <label>
+                            Model
+                            <input
+                                list="local-models"
+                                value={this.state.model}
+                                onChange={(event) => this.setSetting("model", event.target.value)}
+                                placeholder="Type or select a model id"
+                            />
+                            <datalist id="local-models">
+                                {this.state.models.map((model) => (
+                                    <option key={model.id} value={model.id} />
+                                ))}
+                            </datalist>
+                        </label>
+
+                        <label>
+                            Max context chars
+                            <input
+                                type="number"
+                                min="0"
+                                step="500"
+                                value={this.state.maxContextChars}
+                                onChange={(event) => this.setSetting("maxContextChars", Number(event.target.value))}
+                            />
+                        </label>
+
+                        <label>
+                            Max output tokens
+                            <input
+                                type="number"
+                                min="32"
+                                step="16"
+                                value={this.state.maxOutputTokens}
+                                onChange={(event) => this.setSetting("maxOutputTokens", Number(event.target.value))}
+                            />
+                        </label>
+
+                        <label className="systemPromptBox">
+                            <span className="systemPromptHeader">
+                                System prompt
+                                <button
+                                    type="button"
+                                    className="resetPromptButton"
+                                    onClick={() => this.resetSystemPrompt(this.state.mode)}
+                                    disabled={this.state.isLoading || currentSystemPrompt === defaultSystemPrompts[this.state.mode]}
+                                >
+                                    Reset
+                                </button>
+                            </span>
+                            <textarea
+                                value={currentSystemPrompt}
+                                onChange={(event) => this.setSystemPrompt(this.state.mode, event.target.value)}
+                            />
+                        </label>
+
+                        <button type="button" onClick={() => this.refreshModels()} disabled={this.state.isLoading}>
+                            Refresh Models
                         </button>
-                        <button
-                            type="button"
-                            className={this.state.mode === "replace" ? "modeButton active" : "modeButton"}
-                            onClick={() => this.setSetting("mode", "replace")}
-                        >
-                            Replace
-                        </button>
-                    </div>
-
-                    <label>
-                        Endpoint
-                        <input
-                            value={this.state.endpoint}
-                            onChange={(event) => this.setSetting("endpoint", event.target.value)}
-                            onBlur={() => this.refreshModels()}
-                        />
-                    </label>
-
-                    <label>
-                        Model
-                        <input
-                            list="local-models"
-                            value={this.state.model}
-                            onChange={(event) => this.setSetting("model", event.target.value)}
-                            placeholder="Type or select a model id"
-                        />
-                        <datalist id="local-models">
-                            {this.state.models.map((model) => (
-                                <option key={model.id} value={model.id} />
-                            ))}
-                        </datalist>
-                    </label>
-
-                    <label>
-                        Max context chars
-                        <input
-                            type="number"
-                            min="0"
-                            step="500"
-                            value={this.state.maxContextChars}
-                            onChange={(event) => this.setSetting("maxContextChars", Number(event.target.value))}
-                        />
-                    </label>
-
-                    <label>
-                        Max output tokens
-                        <input
-                            type="number"
-                            min="32"
-                            step="16"
-                            value={this.state.maxOutputTokens}
-                            onChange={(event) => this.setSetting("maxOutputTokens", Number(event.target.value))}
-                        />
-                    </label>
-                </section>
+                    </section>
+                )}
 
                 <label className="promptBox">
                     Prompt
@@ -648,15 +602,6 @@ export default class Home extends React.Component<Record<string, never>, HomeSta
 
                 <button className="primaryAction" type="button" onClick={this.handleSubmit} disabled={this.state.isLoading}>
                     {this.state.isLoading ? "Working..." : this.state.mode === "replace" ? "Replace Selection" : "Insert Paragraph"}
-                </button>
-
-                <button
-                    className="secondaryAction"
-                    type="button"
-                    onClick={this.handleReject}
-                    disabled={this.state.isLoading || this.state.lastAction === null}
-                >
-                    Reject Previous Action
                 </button>
 
                 <div className="status" role="status">
